@@ -133,16 +133,17 @@ const authMsg=e=>({
  "auth/unauthorized-domain":"This website’s address isn’t in Firebase’s Authorized domains list yet.","app/not-invited":"That email hasn’t been invited yet. Ask the family admin to add it.",
  "permission-denied":"Firebase blocked that. Check that the Firestore rules are published."}[e&&e.code]||"Something went wrong. Please try again.");
 
+async function join(u,name){
+ const low=(u.email||"").toLowerCase(),cfg=await getDoc(doc(db,"config","app"));let role="Family",n=name;
+ if(!cfg.exists()){await setDoc(doc(db,"config","app"),{adminUid:u.uid});role="Admin"}
+ else{const inv=await getDoc(doc(db,"invites",low));if(!inv.exists())throw{code:"app/not-invited"};n=n||inv.data().name}
+ await setDoc(doc(db,"members",u.uid),{name:n||low.split("@")[0],email:low,role});
+}
 async function signUp(name,email,pw){
  joining=true;let cred;
  try{cred=await createUserWithEmailAndPassword(auth,email,pw)}catch(e){joining=false;throw e}
- const u=cred.user,low=email.toLowerCase();
- try{
-  const cfg=await getDoc(doc(db,"config","app"));let role="Family";
-  if(!cfg.exists()){await setDoc(doc(db,"config","app"),{adminUid:u.uid});role="Admin"}
-  else if(!(await getDoc(doc(db,"invites",low))).exists())throw{code:"app/not-invited"};
-  await setDoc(doc(db,"members",u.uid),{name,email:low,role});
- }catch(e){await deleteUser(u).catch(()=>{});joining=false;throw e}
+ const u=cred.user;
+ try{await join(u,name)}catch(e){await deleteUser(u).catch(()=>{});joining=false;throw e}
  joining=false;start(u);
 }
 function authScreen(mode="in",msg=""){
@@ -175,7 +176,10 @@ onAuthStateChanged(auth,async u=>{
  if(joining)return;
  unsubs.forEach(f=>f());unsubs=[];invSub=false;members=[];gA=[];gB=[];claims={};invites=[];adminUid=null;mLoaded=false;noAccess=false;
  if(!u){me=null;render();return}
- let ok=false;try{ok=(await getDoc(doc(db,"members",u.uid))).exists()}catch(e){console.error(e)}
+ let ok=false,rules=false;
+ try{ok=(await getDoc(doc(db,"members",u.uid))).exists()}catch(e){console.error(e);rules=e.code==="permission-denied"}
+ if(rules){me=u.uid;noAccess="rules";render();return}
+ if(!ok){try{await join(u,"");ok=true}catch(e){console.error(e);if(e.code==="permission-denied"){me=u.uid;noAccess="rules";render();return}}}
  if(ok)start(u);else{me=u.uid;noAccess=true;render()}
 });
 $("#so").onclick=()=>signOut(auth);
@@ -199,6 +203,7 @@ function render(){
  $("#who").hidden=!me;
  if(!me)return authScreen();
  $("#wn").textContent=members.find(m=>m.id===me)?.name||"";
+ if(noAccess==='rules'){app.innerHTML='<section class="gift auth"><h1>Almost there</h1><p class="muted">You’re signed in, but Firebase is blocking the database. In the Firebase console, create the Firestore Database, then paste the rules into Firestore Database → Rules and click Publish. Then reload this page.</p></section>';return}
  if(noAccess){app.innerHTML='<section class="gift auth"><h1>Not on the list yet</h1><p class="muted">This account isn’t a member of the family hub. Ask the family admin to invite your email, then use Sign out and Create account.</p></section>';return}
  if(!mLoaded){app.innerHTML='<p class="muted">Loading…</p>';return}
  if(!members.some(m=>m.id===me)){noAccess=true;return render()}
