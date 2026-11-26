@@ -83,73 +83,176 @@ dialog{border-top:4px solid var(--berry)}
 .note,select,input,textarea,.btn,.chip,.toast{border-radius:2px}
 .member,.gift,.empty,dialog,.av,.ov{border-radius:3px}
 .tag{border-radius:2px}
+[hidden]{display:none!important}
+.auth{max-width:420px;margin:24px auto}.auth form{display:block}
 </style>
 </head>
 <body>
 <header><div class="bar">
 <button class="brand" id="home">🎄 Family Gift Hub</button>
-<label class="who" style="margin:0">Test as <select id="me" aria-label="Prototype only: switch family member"></select></label>
+<div class="who" id="who" hidden><span id="wn"></span><button class="btn sm" id="so">Sign out</button></div>
 </div></header>
-<main id="app"></main>
+<main id="app"><p class="muted">Loading…</p></main>
 <dialog id="dlg"><form id="gf" method="dialog"></form></dialog>
 <div id="toast" class="toast" hidden role="status"></div>
-<script>
-const names=["Grandma Rose","Grandpa Joe","Mom","Dad","Aunt Carla","Uncle Mike","Maya","Ben","Priya","Leo","Nana June"];
-const members=names.map((n,i)=>({id:"m"+i,email:"member"+i+"@example.com",name:n,role:i<2||i==10?"Grandparent":i<4?"Parent":i<6?"Aunt / Uncle":"Cousin"}));
-let n=0;const G=(o,name,price,url,notes,by,claimedBy,surprise)=>({id:++n,owner:"m"+o,name,price,url,notes,by:by??"m"+o,claimedBy:claimedBy??null,purchased:false,surprise:!!surprise});
-let gifts=[
-G(2,"Cast iron skillet, 10 inch",35,"https://example.com/skillet","Pre-seasoned please"),
-G(2,"Fuzzy slippers",28,"","Size 8, gray",null,"m3"),
-G(3,"Cordless drill set",120,"https://example.com/drill","",null,null),
-G(6,"Watercolor paint set",42,"https://example.com/paint","The 24-color one"),
-G(6,"Sketchbook",null,"","Any, A5 size",null,"m7"),
-G(0,"Garden gloves",15,"","Medium"),
-G(7,"Trail running shoes",95,"https://example.com/shoes","Size 10, blue",null,"m2"),
-G(8,"Hardcover novel",null,"","Surprise me with fiction")
-];
-let me="m2",page="dash",view=null,q="",sort="name";
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {getAuth,onAuthStateChanged,signInWithEmailAndPassword,createUserWithEmailAndPassword,sendPasswordResetEmail,signOut,deleteUser} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {getFirestore,collection,doc,getDoc,setDoc,addDoc,updateDoc,deleteDoc,onSnapshot,query,where,runTransaction,writeBatch} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const firebaseConfig={
+ apiKey:"AIzaSyCRAoRsTciN-UmzT0BRpuDuZ9hhQWqE1iQ",
+ authDomain:"family-gift-hub-79d39.firebaseapp.com",
+ projectId:"family-gift-hub-79d39",
+ storageBucket:"family-gift-hub-79d39.firebasestorage.app",
+ messagingSenderId:"1013406971183",
+ appId:"1:1013406971183:web:2ae3c86f54da47374f9dda",
+ measurementId:"G-FNDYDY7K2P"
+};
+const fb=initializeApp(firebaseConfig),auth=getAuth(fb),db=getFirestore(fb);
+
 const $=s=>document.querySelector(s),app=$("#app"),dlg=$("#dlg");
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const nm=id=>members.find(m=>m.id===id).name;
-const toast=t=>{const e=$("#toast");e.textContent=t;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,2200)};
-function renderStrip(){const s=$("#me");s.innerHTML=members.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("");s.value=me}
-$("#me").onchange=e=>{me=e.target.value;render()};
-$("#home").onclick=()=>{page="dash";render()};
-
-// Visibility rule (in Firebase this must be enforced by Security Rules, not the UI)
+const toast=t=>{const e=$("#toast");e.textContent=t;e.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>e.hidden=true,2600)};
+const ERR="Couldn’t save that. Check your connection and try again.";
+let members=[],gA=[],gB=[],claims={},adminUid=null,invites=[],gifts=[],unsubs=[];
+let me=null,mLoaded=false,noAccess=false,joining=false,invSub=false;
+let page="dash",view=null,q="",sort="name";
+const nm=id=>members.find(m=>m.id===id)?.name||"someone";
+const isAdmin=()=>!!me&&adminUid===me;
+// Privacy: owners never receive claim documents or surprise gifts (Firestore rules enforce this).
+function recompute(){gifts=[...gA,...gB].map(g=>{const c=claims[g.id];return{...g,claimedBy:g.reserved?(c?c.claimedBy:"hidden"):null,purchased:!!(c&&c.purchased)}})}
 const visible=o=>gifts.filter(g=>g.owner===o&&(o!==me||!g.surprise));
-// Simulated atomic claim: re-check state at write time, like a Firestore transaction.
-function claim(id){const g=gifts.find(x=>x.id===id);
- if(!g)return toast("That gift was removed.");
- if(g.owner===me)return toast("You can’t claim your own gift.");
- if(g.claimedBy)return toast("Someone just claimed this one.");
- g.claimedBy=me;toast("Claimed. Only others can see it’s you.");render()}
-function unclaim(id){const g=gifts.find(x=>x.id===id);if(g&&g.claimedBy===me){g.claimedBy=null;g.purchased=false;toast("Claim removed.");render()}}
-function buy(id){const g=gifts.find(x=>x.id===id);if(g&&g.claimedBy===me){g.purchased=!g.purchased;render()}}
-function del(id){if(confirm("Remove this gift?")){gifts=gifts.filter(g=>g.id!==id);toast("Gift removed.");render()}}
 
-function render(){renderStrip();page==="dash"?dash():list()}
-let mid=100;
-// Replace with your own email. Add/remove member controls show only for the account signed in with this email.
-const ADMIN_EMAIL="member2@example.com";
-const isAdmin=()=>members.find(m=>m.id===me)?.email===ADMIN_EMAIL;
+/* ---------- Sign in / account ---------- */
+const authMsg=e=>({
+ "auth/invalid-credential":"That email or password isn’t right.","auth/wrong-password":"That email or password isn’t right.","auth/user-not-found":"That email or password isn’t right.",
+ "auth/invalid-email":"That email address doesn’t look right.","auth/email-already-in-use":"That email already has an account. Choose Sign in, or reset your password.",
+ "auth/weak-password":"Choose a password with at least 6 characters.","auth/too-many-requests":"Too many tries. Wait a few minutes and try again.",
+ "auth/network-request-failed":"No connection. Check your internet and try again.","auth/operation-not-allowed":"Email sign-in isn’t turned on in Firebase yet.",
+ "auth/unauthorized-domain":"This website’s address isn’t in Firebase’s Authorized domains list yet.","app/not-invited":"That email hasn’t been invited yet. Ask the family admin to add it.",
+ "permission-denied":"Firebase blocked that. Check that the Firestore rules are published."}[e&&e.code]||"Something went wrong. Please try again.");
+
+async function signUp(name,email,pw){
+ joining=true;let cred;
+ try{cred=await createUserWithEmailAndPassword(auth,email,pw)}catch(e){joining=false;throw e}
+ const u=cred.user,low=email.toLowerCase();
+ try{
+  const cfg=await getDoc(doc(db,"config","app"));let role="Family";
+  if(!cfg.exists()){await setDoc(doc(db,"config","app"),{adminUid:u.uid});role="Admin"}
+  else if(!(await getDoc(doc(db,"invites",low))).exists())throw{code:"app/not-invited"};
+  await setDoc(doc(db,"members",u.uid),{name,email:low,role});
+ }catch(e){await deleteUser(u).catch(()=>{});joining=false;throw e}
+ joining=false;start(u);
+}
+function authScreen(mode="in",msg=""){
+ const up=mode==="up",rs=mode==="reset";
+ app.innerHTML=`<section class="gift auth"><h1>${rs?"Reset password":up?"Create your account":"Sign in"}</h1>
+ <p class="muted">${up?"Use the email address the family admin invited. If no one has set this up yet, the first account created becomes the admin.":rs?"We’ll email you a link to choose a new password.":"Welcome to the family gift list."}</p>
+ <form id="af" novalidate>
+ ${up?'<label for="an">Your name</label><input id="an" autocomplete="name" maxlength="40">':""}
+ <label for="ae">Email</label><input id="ae" type="email" autocomplete="email" inputmode="email">
+ ${rs?"":`<label for="ap">Password</label><input id="ap" type="password" autocomplete="${up?"new-password":"current-password"}">`}
+ <div class="err" id="aerr" role="alert">${esc(msg)}</div>
+ <div class="acts"><button class="btn pri" type="submit" id="ab">${rs?"Send reset email":up?"Create account":"Sign in"}</button></div></form>
+ <div class="acts" style="margin-top:6px">${mode!=="in"?'<button class="btn link" data-m="in">Sign in</button>':""}${!up?'<button class="btn link" data-m="up">Create account</button>':""}${mode==="in"?'<button class="btn link" data-m="reset">Forgot password?</button>':""}</div></section>`;
+ app.querySelectorAll("[data-m]").forEach(b=>b.onclick=()=>authScreen(b.dataset.m));
+ $("#af").onsubmit=async e=>{e.preventDefault();
+  const email=$("#ae").value.trim(),pw=$("#ap")?$("#ap").value:"",name=$("#an")?$("#an").value.trim().replace(/\s+/g," "):"",err=$("#aerr"),btn=$("#ab");
+  err.style.color="";
+  if(up&&!name){err.textContent="Enter your name.";return}
+  if(!email){err.textContent="Enter your email.";return}
+  if(!rs&&!pw){err.textContent="Enter your password.";return}
+  btn.disabled=true;err.textContent="";
+  try{
+   if(rs){await sendPasswordResetEmail(auth,email);err.style.color="var(--ok)";err.textContent="If that email has an account, a reset link is on its way. Check your spam folder too."}
+   else if(up)await signUp(name,email,pw);
+   else await signInWithEmailAndPassword(auth,email,pw);
+  }catch(x){console.error(x);err.textContent=authMsg(x)}
+  btn.disabled=false};
+}
+onAuthStateChanged(auth,async u=>{
+ if(joining)return;
+ unsubs.forEach(f=>f());unsubs=[];invSub=false;members=[];gA=[];gB=[];claims={};invites=[];adminUid=null;mLoaded=false;noAccess=false;
+ if(!u){me=null;render();return}
+ let ok=false;try{ok=(await getDoc(doc(db,"members",u.uid))).exists()}catch(e){console.error(e)}
+ if(ok)start(u);else{me=u.uid;noAccess=true;render()}
+});
+$("#so").onclick=()=>signOut(auth);
+$("#home").onclick=()=>{if(me&&!noAccess){page="dash";render()}};
+
+/* ---------- Live data ---------- */
+function start(u){
+ me=u.uid;noAccess=false;page="dash";view=null;unsubs.forEach(f=>f());unsubs=[];invSub=false;
+ const sub=(ref,fn)=>unsubs.push(onSnapshot(ref,fn,e=>{console.error(e);toast("Couldn’t load data. Check the Firestore rules are published.")}));
+ const G=collection(db,"gifts");
+ sub(collection(db,"members"),s=>{members=s.docs.map(d=>({id:d.id,...d.data()}));mLoaded=true;render()});
+ sub(query(G,where("owner","==",me),where("surprise","==",false)),s=>{gA=s.docs.map(d=>({id:d.id,...d.data()}));render()});
+ sub(query(G,where("owner","!=",me)),s=>{gB=s.docs.map(d=>({id:d.id,...d.data()}));render()});
+ sub(query(collection(db,"claims"),where("owner","!=",me)),s=>{claims={};s.docs.forEach(d=>claims[d.id]=d.data());render()});
+ sub(doc(db,"config","app"),s=>{adminUid=s.exists()?s.data().adminUid:null;
+  if(adminUid===me&&!invSub){invSub=true;sub(collection(db,"invites"),t=>{invites=t.docs.map(d=>({id:d.id,...d.data()}));render()})}render()});
+ render();
+}
+function render(){
+ recompute();
+ $("#who").hidden=!me;
+ if(!me)return authScreen();
+ $("#wn").textContent=members.find(m=>m.id===me)?.name||"";
+ if(noAccess){app.innerHTML='<section class="gift auth"><h1>Not on the list yet</h1><p class="muted">This account isn’t a member of the family hub. Ask the family admin to invite your email, then use Sign out and Create account.</p></section>';return}
+ if(!mLoaded){app.innerHTML='<p class="muted">Loading…</p>';return}
+ if(!members.some(m=>m.id===me)){noAccess=true;return render()}
+ if(page==="list"&&!members.some(m=>m.id===view))page="dash";
+ page==="dash"?dash():list();
+}
+
+/* ---------- Gift actions ---------- */
+async function claim(id){
+ try{await runTransaction(db,async t=>{const r=doc(db,"gifts",id),s=await t.get(r);
+  if(!s.exists())throw"gone";const g=s.data();if(g.owner===me)throw"own";if(g.reserved)throw"taken";
+  t.update(r,{reserved:true});t.set(doc(db,"claims",id),{claimedBy:me,owner:g.owner,purchased:false})});
+  toast("Claimed. Only others can see it’s you.")}
+ catch(e){toast(e==="taken"?"Someone just claimed this one.":e==="gone"?"That gift was removed.":e==="own"?"You can’t claim your own gift.":ERR)}}
+async function unclaim(id){const g=gifts.find(x=>x.id===id);if(!g||g.claimedBy!==me)return;
+ try{const b=writeBatch(db);b.update(doc(db,"gifts",id),{reserved:false});b.delete(doc(db,"claims",id));await b.commit();toast("Claim removed.")}catch(e){console.error(e);toast(ERR)}}
+async function buy(id){const g=gifts.find(x=>x.id===id);if(!g||g.claimedBy!==me)return;
+ try{await updateDoc(doc(db,"claims",id),{purchased:!g.purchased})}catch(e){console.error(e);toast(ERR)}}
+async function del(id){if(!confirm("Remove this gift?"))return;try{await deleteDoc(doc(db,"gifts",id));toast("Gift removed.")}catch(e){console.error(e);toast(ERR)}}
+
+/* ---------- Members ---------- */
 function manage(m,own){const b=(own?`<button class="btn sm" data-rename="${m.id}">Change my name</button>`:"")+(isAdmin()&&!own?`<button class="btn sm" data-remove="${m.id}">Remove member</button>`:"");return b?`<div class="acts">${b}</div>`:""}
 function nameForm(title,val,save){
  $("#gf").innerHTML=`<h2>${title}</h2><label for="nn">Name</label><input id="nn" required maxlength="40" value="${esc(val)}"><div class="err" id="fe" role="alert"></div><div class="acts" style="justify-content:flex-end;margin-top:8px"><button type="button" class="btn" id="fc">Cancel</button><button type="submit" class="btn pri">Save name</button></div>`;
  $("#fc").onclick=()=>dlg.close();
- $("#gf").onsubmit=e=>{e.preventDefault();const v=$("#nn").value.trim().replace(/\s+/g," ");
+ $("#gf").onsubmit=async e=>{e.preventDefault();const v=$("#nn").value.trim().replace(/\s+/g," ");
   if(!v){$("#fe").textContent="Enter a name.";return}
   if(members.some(m=>m.name.toLowerCase()===v.toLowerCase()&&m.name!==val)){$("#fe").textContent="Someone in the family already has that name.";return}
-  save(v);dlg.close();render()};
+  try{await save(v);dlg.close()}catch(x){console.error(x);$("#fe").textContent=ERR}};
  dlg.showModal();$("#nn").select();
 }
-// Only the signed-in person can rename themselves. Firestore rules must enforce this too.
-function renameMe(id){if(id!==me)return toast("You can only change your own name.");const m=members.find(x=>x.id===id);nameForm("Change my name",m.name,v=>{m.name=v;toast("Name updated.")})}
-function addMember(){if(!isAdmin())return toast("Only the family admin can add members.");nameForm("Add a family member","",v=>{members.push({id:"m"+(++mid),name:v,role:"Family"});toast(v+" added.")})}
-function removeMember(id){if(!isAdmin()||id===me)return toast("Only the family admin can remove other members.");const m=members.find(x=>x.id===id);
+function renameMe(id){if(id!==me)return toast("You can only change your own name.");const m=members.find(x=>x.id===id);nameForm("Change my name",m.name,async v=>{await updateDoc(doc(db,"members",me),{name:v});toast("Name updated.")})}
+function addMember(){
+ if(!isAdmin())return toast("Only the family admin can add members.");
+ $("#gf").innerHTML=`<h2>Invite a family member</h2><label for="in">Name</label><input id="in" required maxlength="40"><label for="ie">Their email</label><input id="ie" type="email" required inputmode="email"><p class="muted">They open this site, choose Create account, and use this exact email address.</p><div class="err" id="fe" role="alert"></div><div class="acts" style="justify-content:flex-end;margin-top:8px"><button type="button" class="btn" id="fc">Cancel</button><button type="submit" class="btn pri">Save invite</button></div>`;
+ $("#fc").onclick=()=>dlg.close();
+ $("#gf").onsubmit=async e=>{e.preventDefault();const n=$("#in").value.trim().replace(/\s+/g," "),em=$("#ie").value.trim().toLowerCase();
+  if(!n||!/^\S+@\S+\.\S+$/.test(em)){$("#fe").textContent="Enter a name and a valid email.";return}
+  if(members.some(m=>m.email===em)){$("#fe").textContent="That email is already a member.";return}
+  try{await setDoc(doc(db,"invites",em),{name:n,by:me});dlg.close();toast(n+" invited. Ask them to create an account.")}catch(x){console.error(x);$("#fe").textContent=ERR}};
+ dlg.showModal();$("#in").focus();
+}
+async function removeMember(id){
+ if(!isAdmin()||id===me)return toast("Only the family admin can remove other members.");
+ const m=members.find(x=>x.id===id);
  if(!confirm("Remove "+m.name+"? Their wishlist and any surprise gifts they added for others will be deleted, and their claims will be released."))return;
- gifts=gifts.filter(g=>g.owner!==id&&g.by!==id);gifts.forEach(g=>{if(g.claimedBy===id){g.claimedBy=null;g.purchased=false}});
- members.splice(members.indexOf(m),1);toast(m.name+" removed.");render()}
+ try{const b=writeBatch(db),dead=new Set(gifts.filter(g=>g.owner===id||g.by===id).map(g=>g.id));
+  dead.forEach(i=>b.delete(doc(db,"gifts",i)));
+  Object.keys(claims).filter(k=>claims[k].claimedBy===id).forEach(k=>{b.delete(doc(db,"claims",k));if(!dead.has(k))b.update(doc(db,"gifts",k),{reserved:false})});
+  if(m.email)b.delete(doc(db,"invites",m.email));
+  b.delete(doc(db,"members",id));await b.commit();toast(m.name+" removed.")}catch(e){console.error(e);toast(ERR)}
+}
+
+/* ---------- Screens ---------- */
 function hero(){
  const now=new Date(),s=new Date(now.getFullYear(),now.getMonth(),now.getDate());let t=new Date(s.getFullYear(),11,25);if(t<s)t=new Date(s.getFullYear()+1,11,25);
  const d=Math.round((t-s)/864e5),v=members.flatMap(m=>visible(m.id)),c=v.filter(g=>g.claimedBy).length;
@@ -158,20 +261,22 @@ function status(g,own){return g.claimedBy?`<span class="tag res">${own?"Reserved
 function overview(m){
  const gs=visible(m.id),open=gs.filter(g=>!g.claimedBy).length,own=m.id===me;
  const rows=gs.slice(0,4).map(g=>`<li class="row"><span class="rn">${esc(g.name)}${g.price!=null?` <span class="muted">$${Number(g.price).toFixed(0)}</span>`:""}</span>${status(g,own)}${!own&&!g.claimedBy?`<button class="btn sm pri" data-claim="${g.id}">Claim</button>`:""}</li>`).join("");
- return`<section class="ov"><button class="ovh" data-open="${m.id}"><span class="av" aria-hidden="true">${esc(m.name[0])}</span><span><span class="m-name">${esc(m.name)}${own?" (you)":""}</span><br><span class="m-sub">${gs.length?`${gs.length} ${gs.length==1?"gift":"gifts"}, ${open} available`:"No gifts yet"}</span></span></button>
+ return`<section class="ov"><button class="ovh" data-open="${m.id}"><span class="av" aria-hidden="true">${esc((m.name||"?")[0])}</span><span><span class="m-name">${esc(m.name)}${own?" (you)":""}</span><br><span class="m-sub">${gs.length?`${gs.length} ${gs.length==1?"gift":"gifts"}, ${open} available`:"No gifts yet"}</span></span></button>
  ${rows?`<ul class="rows">${rows}</ul>`:'<p class="muted" style="margin:0">Nothing listed yet.</p>'}
  ${gs.length>4?`<button class="btn link" data-open="${m.id}">See all ${gs.length} gifts</button>`:""}${manage(m,own)}</section>`}
 function dash(){
  const k=q.toLowerCase(),f=members.filter(m=>m.name.toLowerCase().includes(k)||visible(m.id).some(g=>g.name.toLowerCase().includes(k)));
- app.innerHTML=`<div class="note">Prototype: data lives in this page only and resets on reload. Privacy is shown here by the interface; the real version must enforce it, including who can rename or remove members, with Firebase Security Rules.</div>
+ const pend=isAdmin()?invites.filter(i=>!members.some(m=>m.email===i.id)):[];
+ app.innerHTML=`${pend.length?`<div class="note">Invited, not joined yet: ${pend.map(i=>`${esc(i.name)} (${esc(i.id)}) <button class="btn link sm" data-uninv="${esc(i.id)}">Cancel</button>`).join(" · ")}</div>`:""}
  ${hero()}<h1>Our family</h1><p class="muted">${members.length} members. See what everyone wants at a glance, claim a gift here, or open a full list.</p>
  <div class="tools"><input id="s" type="search" placeholder="Search people or gifts" aria-label="Search people or gifts" value="${esc(q)}">${isAdmin()?'<button class="btn pri" id="addm">Add member</button>':""}</div>
  <div class="grid">${f.map(overview).join("")||'<div class="empty">No one matches that search.</div>'}</div>`;
  const s=$("#s");s.oninput=e=>{q=e.target.value;const p=e.target.selectionStart;dash();const t=$("#s");t.focus();t.setSelectionRange(p,p)};
  app.querySelectorAll("[data-open]").forEach(b=>b.onclick=()=>{view=b.dataset.open;page="list";render()});
- app.querySelectorAll("[data-claim]").forEach(b=>b.onclick=()=>claim(+b.dataset.claim));
+ app.querySelectorAll("[data-claim]").forEach(b=>b.onclick=()=>claim(b.dataset.claim));
  app.querySelectorAll("[data-rename]").forEach(b=>b.onclick=()=>renameMe(b.dataset.rename));
  app.querySelectorAll("[data-remove]").forEach(b=>b.onclick=()=>removeMember(b.dataset.remove));
+ app.querySelectorAll("[data-uninv]").forEach(b=>b.onclick=()=>deleteDoc(doc(db,"invites",b.dataset.uninv)).catch(()=>toast(ERR)));
  const am=$("#addm");if(am)am.onclick=addMember;
 }
 function list(){
@@ -187,12 +292,11 @@ function list(){
  $("#sort").value=sort;$("#sort").onchange=e=>{sort=e.target.value;list()};
  $("#back").onclick=()=>{page="dash";render()};
  $("#add").onclick=()=>form();
- app.querySelectorAll("[data-a]").forEach(b=>b.onclick=()=>{const id=+b.dataset.id,a=b.dataset.a;({claim,unclaim,buy,del,edit:i=>form(i)})[a](id)});
+ app.querySelectorAll("[data-a]").forEach(b=>b.onclick=()=>{const id=b.dataset.id,a=b.dataset.a;({claim,unclaim,buy,del,edit:i=>form(i)})[a](id)});
 }
 function card(g){
  const mine=g.claimedBy===me,own=g.owner===me;
- let tag;
- if(g.surprise)tag='<span class="tag sur">Surprise</span> ';else tag="";
+ let tag=g.surprise?'<span class="tag sur">Surprise</span> ':"";
  if(g.claimedBy)tag+=`<span class="tag res">${own?"Reserved":mine?"Claimed by you":"Claimed by "+esc(nm(g.claimedBy))}</span>`;else tag+='<span class="tag avail">Available</span>';
  if(!own&&g.purchased)tag+=' <span class="tag avail">Purchased</span>';
  const acts=[];
@@ -203,7 +307,6 @@ function card(g){
  <div>${tag}</div>${g.notes?`<div class="muted">${esc(g.notes)}</div>`:""}
  ${g.url?`<div><a href="${esc(g.url)}" target="_blank" rel="noopener noreferrer">View product page</a></div>`:""}
  <div class="acts">${acts.join("")}</div></article>`}
-
 function form(id){
  const g=id?gifts.find(x=>x.id===id):{},own=view===me;
  $("#gf").innerHTML=`<h2>${id?"Edit gift":own?"Add a gift":"Add a surprise gift"}</h2>
@@ -214,14 +317,14 @@ function form(id){
  <div class="err" id="fe" role="alert"></div>
  <div class="acts" style="justify-content:flex-end;margin-top:8px"><button type="button" class="btn" id="fc">Cancel</button><button type="submit" class="btn pri">Save gift</button></div>`;
  $("#fc").onclick=()=>dlg.close();
- $("#gf").onsubmit=e=>{e.preventDefault();
+ $("#gf").onsubmit=async e=>{e.preventDefault();
   const name=$("#fn").value.trim(),url=$("#fu").value.trim(),pr=$("#fp").value;
   let err="";if(!name)err="Enter a gift name.";
   else if(url&&!/^https?:\/\/[^\s]+\.[^\s]+$/i.test(url))err="Link must start with http:// or https://.";
   if(err){$("#fe").textContent=err;return}
   const d={name,url,price:pr===""?null:+pr,notes:$("#fno").value.trim()};
-  if(id)Object.assign(g,d);else gifts.push({id:++n,owner:view,by:me,claimedBy:null,purchased:false,surprise:!own,...d});
-  dlg.close();toast("Gift saved.");render()};
+  try{if(id)await updateDoc(doc(db,"gifts",id),d);else await addDoc(collection(db,"gifts"),{owner:view,by:me,reserved:false,surprise:!own,...d});dlg.close();toast("Gift saved.")}
+  catch(x){console.error(x);$("#fe").textContent=ERR}};
  dlg.showModal();$("#fn").focus();
 }
 render();
